@@ -36,6 +36,9 @@ example.
 
 ## Repro
 
+A runnable, self-contained copy of the files below is in
+[`cljrs-native-deps-repro/`](./cljrs-native-deps-repro/).
+
 `cljrs.edn`:
 
 ```clojure

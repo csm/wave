@@ -1,0 +1,6 @@
+{:deps {cljrs.base64 {:git/url    "https://github.com/csm/clojurust"
+                      :git/sha    "963f0aaffbfb5c89991c95b515d57d811b95c81d"
+                      :rust/crate "crates/cljrs-base64"
+                      :rust/init  "cljrs_base64::cljrs_init"
+                      :rust/load  :dylib}}
+ :paths ["src"]}
