@@ -1,0 +1,52 @@
+;; wave.http3 — HTTP/3 client.
+;;
+;; HTTP/3 runs over QUIC, which cljrs-net provides natively
+;; (clojure.rust.net.h3 + clojure.rust.net.quic).  This namespace adapts our
+;; request config to the native client and normalises the response into the same
+;; {:version :status :reason :headers :body} shape the other versions return.
+
+(ns wave.http3)
+
+(require '[clojure.rust.net.h3 :as h3]
+         '[clojure.rust.error  :as err]
+         '[clojure.core.async  :refer [take!]]
+         '[clojure.string      :as str]
+         '[wave.bytes          :as b]
+         '[wave.url            :as url]
+         '[wave.http           :as http])
+
+(defn- ^:async drain-body-chan
+  [ch]
+  (loop [acc []]
+    (let [v (await (take! ch))]
+      (cond
+        (nil? v)           (b/concat-bytes acc)
+        (err/error? v)     (b/concat-bytes acc)
+        :else              (recur (conj acc v))))))
+
+(defn ^:async request
+  "Perform an HTTP/3 request described by cfg. Returns a response map
+  {:version :status :reason :headers :body} or {:error msg}."
+  [cfg]
+  (let [u           (url/parse (:url cfg))
+        ;; HTTP/3 is always over QUIC/TLS — normalise to an https URL.
+        target      (str "https://" (:host u)
+                         (if (= (:port u) 443) "" (str ":" (:port u)))
+                         (:path+query u))
+        headers-map (reduce (fn [m [k v]] (assoc m (str/lower-case k) v))
+                            {}
+                            (http/common-headers cfg))
+        opts        (if (:insecure? cfg) {:insecure-skip-verify true} {})
+        req         {:url target :method (:method cfg) :headers headers-map}
+        resp        (await (take! (h3/request req opts)))]
+    (if (or (nil? resp) (err/error? resp))
+      {:error (str "HTTP/3 request failed: "
+                   (if resp (http/error-message resp) "no response"))}
+      (let [body (await (drain-body-chan (:body resp)))
+            hdrs (vec (:headers resp))]
+        (h3/close resp)
+        {:version "HTTP/3"
+         :status  (:status resp)
+         :reason  ""
+         :headers hdrs
+         :body    body}))))

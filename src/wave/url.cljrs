@@ -1,0 +1,93 @@
+;; wave.url — minimal RFC 3986 URL parsing for the HTTP client.
+;;
+;; Parses  scheme://[userinfo@]host[:port][/path][?query][#fragment]  into a map.
+;; Regex is avoided (the runtime's string fns are index-of/subs based) so parsing
+;; is done with explicit scans.
+
+(ns wave.url)
+
+(require '[clojure.string :as str])
+
+(def ^:private default-ports
+  {"http" 80 "https" 443})
+
+(defn- split-at-char
+  "Split s at the first occurrence of separator c. Returns [before after]
+  where after excludes the separator, or [s nil] if c is absent."
+  [s c]
+  (let [i (str/index-of s c)]
+    (if (nil? i)
+      [s nil]
+      [(subs s 0 i) (subs s (+ i (count c)))])))
+
+(defn- parse-authority
+  "Parse an authority component into {:userinfo :host :port}."
+  [authority scheme]
+  (let [[userinfo hostport] (let [i (str/last-index-of authority "@")]
+                              (if (nil? i)
+                                [nil authority]
+                                [(subs authority 0 i) (subs authority (inc i))]))
+        ;; IPv6 literals look like [::1]:443 — keep the bracketed host intact.
+        ipv6?    (str/starts-with? hostport "[")
+        host     (if ipv6?
+                   (subs hostport 1 (str/index-of hostport "]"))
+                   (first (split-at-char hostport ":")))
+        port-str (if ipv6?
+                   (let [rest (subs hostport (inc (str/index-of hostport "]")))]
+                     (when (str/starts-with? rest ":") (subs rest 1)))
+                   (second (split-at-char hostport ":")))
+        port     (if (and port-str (not (str/blank? port-str)))
+                   (parse-long port-str)
+                   (get default-ports scheme 80))]
+    {:userinfo userinfo
+     :host     host
+     :port     port}))
+
+(defn parse
+  "Parse a URL string into
+  {:scheme :userinfo :host :port :path :query :fragment :authority
+   :path+query :host-header}.
+
+  A scheme-less URL defaults to http://. :path defaults to \"/\"."
+  [raw]
+  (let [;; Default scheme when omitted (curl accepts host-only arguments).
+        s         (if (str/includes? raw "://") raw (str "http://" raw))
+        [scheme rest] (split-at-char s "://")
+        scheme    (str/lower-case scheme)
+        ;; Strip fragment first; it is never sent to the server.
+        [rest fragment] (split-at-char rest "#")
+        ;; authority ends at the first '/', '?' — whichever comes first.
+        slash     (str/index-of rest "/")
+        qmark     (str/index-of rest "?")
+        auth-end  (cond
+                    (and slash qmark) (min slash qmark)
+                    slash             slash
+                    qmark             qmark
+                    :else             (count rest))
+        authority (subs rest 0 auth-end)
+        remainder (subs rest auth-end)
+        [path-part query] (split-at-char remainder "?")
+        path      (if (str/blank? path-part) "/" path-part)
+        a         (parse-authority authority scheme)
+        host      (:host a)
+        port      (:port a)
+        default-p (get default-ports scheme)
+        ;; Host header omits the port when it is the scheme default.
+        host-hdr  (if (and default-p (= port default-p))
+                    host
+                    (str host ":" port))]
+    {:scheme     scheme
+     :userinfo   (:userinfo a)
+     :host       host
+     :port       port
+     :path       path
+     :query      query
+     :fragment   fragment
+     :authority  authority
+     :path+query (if (str/blank? (str query)) path (str path "?" query))
+     :host-header host-hdr}))
+
+(defn tls?
+  "True if the parsed URL uses a TLS scheme."
+  [u]
+  (= (:scheme u) "https"))

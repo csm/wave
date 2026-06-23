@@ -1,0 +1,98 @@
+;; wave.bytes — byte-array helpers.
+;;
+;; cljrs byte-arrays hold signed i8 values (-128..127).  Network and protocol
+;; code wants unsigned 0..255 octets, so these helpers translate at the edges:
+;;   (ub b)   — unsigned value (0..255) of a signed byte read via aget
+;;   (sb n)   — signed i8 (-128..127) for an unsigned octet, for aset/byte-array
+;;
+;; Everything here is synchronous and allocation-explicit so it composes with the
+;; async net layer (which hands us seqs of byte-array chunks off a channel).
+
+(ns wave.bytes)
+
+(require '[clojure.rust.charset :as charset])
+
+(defn ub
+  "Unsigned 0..255 value of signed byte b."
+  [b]
+  (bit-and b 0xff))
+
+(defn sb
+  "Signed i8 (-128..127) representation of unsigned octet n (0..255)."
+  [n]
+  (let [n (bit-and n 0xff)]
+    (if (> n 127) (- n 256) n)))
+
+(defn ba-get
+  "Unsigned octet at index i of byte-array a."
+  [a i]
+  (ub (aget a i)))
+
+(defn ints->bytes
+  "Build a byte-array from a collection of unsigned octets (0..255)."
+  [octets]
+  (let [v (vec octets)
+        n (count v)
+        out (byte-array n)]
+    (loop [i 0]
+      (if (< i n)
+        (do (aset out i (sb (nth v i)))
+            (recur (inc i)))
+        out))))
+
+(defn concat-bytes
+  "Concatenate a seq of byte-arrays into a single byte-array."
+  [chunks]
+  (let [total (reduce + 0 (map alength chunks))
+        out   (byte-array total)]
+    (loop [cs (seq chunks) off 0]
+      (if cs
+        (let [c (first cs)
+              n (alength c)]
+          (loop [i 0]
+            (when (< i n)
+              (aset out (+ off i) (aget c i))
+              (recur (inc i))))
+          (recur (next cs) (+ off n)))
+        out))))
+
+(defn slice
+  "Byte-array slice [start end) of a."
+  [a start end]
+  (let [n   (- end start)
+        out (byte-array n)]
+    (loop [i 0]
+      (if (< i n)
+        (do (aset out i (aget a (+ start i)))
+            (recur (inc i)))
+        out))))
+
+(defn index-of-seq
+  "Index of the first occurrence of pattern (a seq of unsigned octets) in
+  byte-array a at or after from, or -1 if not found."
+  [a pattern from]
+  (let [n  (alength a)
+        pv (vec pattern)
+        m  (count pv)]
+    (if (= m 0)
+      from
+      (loop [i (max from 0)]
+        (if (> (+ i m) n)
+          -1
+          (if (loop [j 0]
+                (cond
+                  (= j m)                                 true
+                  (= (ba-get a (+ i j)) (nth pv j))       (recur (inc j))
+                  :else                                   false))
+            i
+            (recur (inc i))))))))
+
+(defn ->str
+  "Decode a whole byte-array to a string (UTF-8 by default)."
+  ([a]   (charset/decode a))
+  ([a c] (charset/decode a c)))
+
+(defn str->
+  "Encode a string to a byte-array (UTF-8 by default)."
+  ([s]   (charset/encode s))
+  ([s c] (charset/encode s c)))

@@ -1,0 +1,254 @@
+;; wave.http2 — HTTP/2 client (RFC 7540) over the cljrs-net byte-stream layer.
+;;
+;; Over TLS the connection negotiates ALPN "h2"; over cleartext it speaks h2c with
+;; prior knowledge (--http2-prior-knowledge).  The client sends the connection
+;; preface + an empty SETTINGS frame, then one HEADERS frame (HPACK-encoded) on
+;; stream 1, and reads frames until the stream ends (END_STREAM) or the server
+;; aborts (GOAWAY / RST_STREAM).  SETTINGS and PING are acknowledged; received
+;; DATA replenishes the flow-control window so large bodies keep flowing.
+
+(ns wave.http2)
+
+(require '[clojure.rust.net   :as net]
+         '[clojure.rust.error :as err]
+         '[clojure.core.async :refer [take! put!]]
+         '[clojure.string     :as str]
+         '[wave.bytes         :as b]
+         '[wave.url           :as url]
+         '[wave.http          :as http]
+         '[wave.hpack         :as hpack])
+
+(def ^:private preface "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+;; Frame types
+(def ^:private FT-DATA 0)
+(def ^:private FT-HEADERS 1)
+(def ^:private FT-RST 3)
+(def ^:private FT-SETTINGS 4)
+(def ^:private FT-PING 6)
+(def ^:private FT-GOAWAY 7)
+(def ^:private FT-WINDOW 8)
+(def ^:private FT-CONTINUATION 9)
+
+;; Flags
+(def ^:private F-END-STREAM 0x1)
+(def ^:private F-ACK 0x1)
+(def ^:private F-END-HEADERS 0x4)
+(def ^:private F-PADDED 0x8)
+(def ^:private F-PRIORITY 0x20)
+
+;; ── Frame encoding ────────────────────────────────────────────────────────────
+
+(defn- frame-bytes
+  [ftype flags stream payload]
+  (let [len (alength payload)
+        hdr (b/ints->bytes
+              [(bit-and (bit-shift-right len 16) 0xff)
+               (bit-and (bit-shift-right len 8) 0xff)
+               (bit-and len 0xff)
+               ftype
+               flags
+               (bit-and (bit-shift-right stream 24) 0x7f)
+               (bit-and (bit-shift-right stream 16) 0xff)
+               (bit-and (bit-shift-right stream 8) 0xff)
+               (bit-and stream 0xff)])]
+    (b/concat-bytes [hdr payload])))
+
+(defn- window-update
+  [stream incr]
+  (frame-bytes FT-WINDOW 0 stream
+               (b/ints->bytes [(bit-and (bit-shift-right incr 24) 0x7f)
+                               (bit-and (bit-shift-right incr 16) 0xff)
+                               (bit-and (bit-shift-right incr 8) 0xff)
+                               (bit-and incr 0xff)])))
+
+;; ── Frame reading (incremental over the :in channel) ──────────────────────────
+
+(defn- ^:async fill-to
+  "Ensure buf-atom holds at least `need` bytes, reading chunks from in-ch.
+  Returns :ok, :eof, or :error."
+  [in-ch buf-atom need]
+  (loop []
+    (if (>= (alength @buf-atom) need)
+      :ok
+      (let [chunk (await (take! in-ch))]
+        (cond
+          (nil? chunk)        :eof
+          (err/error? chunk)  :error
+          :else               (do (reset! buf-atom (b/concat-bytes [@buf-atom chunk]))
+                                  (recur)))))))
+
+(defn- ^:async read-frame
+  "Read one frame, returning {:type :flags :stream :payload} or nil at EOF/error."
+  [in-ch buf-atom]
+  (let [s (await (fill-to in-ch buf-atom 9))]
+    (if (not= s :ok)
+      nil
+      (let [buf    @buf-atom
+            len    (+ (bit-shift-left (b/ba-get buf 0) 16)
+                      (bit-shift-left (b/ba-get buf 1) 8)
+                      (b/ba-get buf 2))
+            ftype  (b/ba-get buf 3)
+            flags  (b/ba-get buf 4)
+            stream (+ (bit-shift-left (bit-and (b/ba-get buf 5) 0x7f) 24)
+                      (bit-shift-left (b/ba-get buf 6) 16)
+                      (bit-shift-left (b/ba-get buf 7) 8)
+                      (b/ba-get buf 8))
+            total  (+ 9 len)
+            s2     (await (fill-to in-ch buf-atom total))]
+        (if (not= s2 :ok)
+          nil
+          (let [payload (b/slice @buf-atom 9 total)]
+            (reset! buf-atom (b/slice @buf-atom total (alength @buf-atom)))
+            {:type ftype :flags flags :stream stream :payload payload}))))))
+
+;; ── Payload helpers ───────────────────────────────────────────────────────────
+
+(defn- strip-headers-padding
+  "Return the HPACK fragment of a HEADERS payload, removing PADDED/PRIORITY."
+  [flags payload]
+  (let [padded?   (not= 0 (bit-and flags F-PADDED))
+        priority? (not= 0 (bit-and flags F-PRIORITY))
+        n         (alength payload)
+        pad-len   (if padded? (b/ba-get payload 0) 0)
+        start     (+ (if padded? 1 0) (if priority? 5 0))]
+    (b/slice payload start (- n pad-len))))
+
+(defn- strip-data-padding
+  [flags payload]
+  (if (not= 0 (bit-and flags F-PADDED))
+    (let [pad (b/ba-get payload 0)
+          n   (alength payload)]
+      (b/slice payload 1 (- n pad)))
+    payload))
+
+;; ── Response assembly ─────────────────────────────────────────────────────────
+
+(defn- build-response
+  [decoded-headers body-chunks]
+  (let [status  (loop [hs (seq decoded-headers)]
+                  (when hs
+                    (let [[k v] (first hs)]
+                      (if (= k ":status") (or (parse-long v) 0) (recur (next hs))))))
+        visible (remove (fn [[k _]] (str/starts-with? k ":")) decoded-headers)]
+    {:version "HTTP/2"
+     :status  (or status 0)
+     :reason  ""
+     :headers (vec visible)
+     :body    (b/concat-bytes body-chunks)}))
+
+;; ── Request header set ────────────────────────────────────────────────────────
+
+(defn- request-headers
+  [cfg u]
+  (concat [[":method"    (:method cfg)]
+           [":scheme"    (:scheme u)]
+           [":authority" (:host-header u)]
+           [":path"      (:path+query u)]]
+          (http/common-headers cfg)))
+
+;; ── Response read loop ────────────────────────────────────────────────────────
+
+(defn- ^:async read-response
+  [conn state]
+  (let [in-ch (:in conn)
+        out-ch (:out conn)
+        buf   (atom (byte-array 0))]
+    (loop [hdr-frag    (byte-array 0)
+           in-headers? false
+           resp-hdrs   nil
+           body        []]
+      (let [frame (await (read-frame in-ch buf))]
+        (if (nil? frame)
+          (if resp-hdrs
+            (build-response resp-hdrs body)
+            {:error "connection closed before HTTP/2 response"})
+          (let [{:keys [type flags stream payload]} frame]
+            (cond
+              ;; SETTINGS (peer's) — acknowledge
+              (and (= type FT-SETTINGS) (= 0 (bit-and flags F-ACK)))
+              (do (await (put! out-ch (frame-bytes FT-SETTINGS F-ACK 0 (byte-array 0))))
+                  (recur hdr-frag in-headers? resp-hdrs body))
+
+              (= type FT-SETTINGS)
+              (recur hdr-frag in-headers? resp-hdrs body)
+
+              ;; PING — echo back as ACK
+              (= type FT-PING)
+              (do (when (= 0 (bit-and flags F-ACK))
+                    (await (put! out-ch (frame-bytes FT-PING F-ACK 0 payload))))
+                  (recur hdr-frag in-headers? resp-hdrs body))
+
+              (= type FT-GOAWAY)
+              (if resp-hdrs
+                (build-response resp-hdrs body)
+                {:error "server sent GOAWAY before responding"})
+
+              (and (= type FT-RST) (= stream 1))
+              {:error "server reset stream 1 (RST_STREAM)"}
+
+              ;; HEADERS on our stream
+              (and (= type FT-HEADERS) (= stream 1))
+              (let [block (strip-headers-padding flags payload)
+                    acc   (b/concat-bytes [hdr-frag block])]
+                (if (not= 0 (bit-and flags F-END-HEADERS))
+                  (let [decoded (hpack/decode acc state)]
+                    (if (not= 0 (bit-and flags F-END-STREAM))
+                      (build-response decoded body)
+                      (recur (byte-array 0) false decoded body)))
+                  (recur acc true resp-hdrs body)))
+
+              ;; CONTINUATION of the header block
+              (and (= type FT-CONTINUATION) (= stream 1) in-headers?)
+              (let [acc (b/concat-bytes [hdr-frag payload])]
+                (if (not= 0 (bit-and flags F-END-HEADERS))
+                  (recur (byte-array 0) false (hpack/decode acc state) body)
+                  (recur acc true resp-hdrs body)))
+
+              ;; DATA on our stream
+              (and (= type FT-DATA) (= stream 1))
+              (let [data   (strip-data-padding flags payload)
+                    n      (alength payload)
+                    chunks (conj body data)]
+                (when (> n 0)
+                  (await (put! out-ch (window-update 0 n)))
+                  (await (put! out-ch (window-update 1 n))))
+                (if (not= 0 (bit-and flags F-END-STREAM))
+                  (build-response resp-hdrs chunks)
+                  (recur hdr-frag in-headers? resp-hdrs chunks)))
+
+              :else
+              (recur hdr-frag in-headers? resp-hdrs body))))))))
+
+;; ── Request driver ────────────────────────────────────────────────────────────
+
+(defn ^:async request
+  "Perform an HTTP/2 request described by cfg. Returns a response map
+  {:version :status :reason :headers :body} or {:error msg}."
+  [cfg]
+  (let [u     (url/parse (:url cfg))
+        tls?  (url/tls? u)
+        base  {:host (:host u) :port (:port u)}
+        opts  (if tls?
+                (assoc base :transport :tls :alpn ["h2"]
+                       :insecure-skip-verify (boolean (:insecure? cfg)))
+                base)
+        opts  (if (:connect-timeout-ms cfg)
+                (assoc opts :connect-timeout-ms (:connect-timeout-ms cfg))
+                opts)
+        conn  (await (take! (net/connect opts)))]
+    (if (err/error? conn)
+      {:error (str "could not connect to " (:host u) ":" (:port u) " — "
+                   (http/error-message conn))}
+      (let [state    (hpack/decoder)
+            hblock   (hpack/encode (request-headers cfg u))
+            es-flag  (if (:body cfg) 0 F-END-STREAM)
+            hframe   (frame-bytes FT-HEADERS (bit-or F-END-HEADERS es-flag) 1 hblock)]
+        (await (put! (:out conn) (b/str-> preface)))
+        (await (put! (:out conn) (frame-bytes FT-SETTINGS 0 0 (byte-array 0))))
+        (await (put! (:out conn) hframe))
+        (when (:body cfg)
+          (await (put! (:out conn) (frame-bytes FT-DATA F-END-STREAM 1 (:body cfg)))))
+        (let [resp (await (read-response conn state))]
+          (net/close conn)
+          resp)))))

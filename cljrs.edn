@@ -1,2 +1,3 @@
-{:deps {tools.cli {:git/url "https://github.com/csm/tools.cli"}}
+{:deps {tools.cli {:git/url "https://github.com/csm/tools.cli"
+                    :git/sha "260c939dba0e4d32723169ef399c4628799297a0"}}
  :paths ["src"]}
