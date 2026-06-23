@@ -21,7 +21,8 @@ native QUIC/HTTP-3 client.
 ## Building / running
 
 `wave` depends on a cljrs build with the default `net`, `async` and `charset`
-features, plus the `clojure.tools.cli` git dependency declared in `cljrs.edn`.
+features and the `cljrs.base64` library (used for HTTP Basic auth), plus the
+`clojure.tools.cli` git dependency declared in `cljrs.edn`.
 
 ```sh
 # Fetch the git dependency (tools.cli) into ~/.cljrs/cache
