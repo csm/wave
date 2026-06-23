@@ -21,16 +21,25 @@ native QUIC/HTTP-3 client.
 ## Building / running
 
 `wave` depends on a cljrs build with the default `net`, `async` and `charset`
-features and the `cljrs.base64` library (used for HTTP Basic auth), plus the
-`clojure.tools.cli` git dependency declared in `cljrs.edn`.
+features. Two dependencies are declared in `cljrs.edn` and brought in by
+`cljrs deps fetch`:
+
+- `clojure.tools.cli` — argument parsing (pure-Clojure git dep).
+- `cljrs.base64` — HTTP Basic-auth encoding (native `:rust/load :dylib` dep;
+  built into a wrapper cdylib and loaded on first use).
 
 ```sh
-# Fetch the git dependency (tools.cli) into ~/.cljrs/cache
+# Fetch declared git dependencies into ~/.cljrs/cache
 cljrs deps fetch
 
 # Run
 cljrs run src/main.cljrs -- https://example.com/
 ```
+
+> Loading the native `cljrs.base64` dep builds a wrapper crate against the
+> clojurust workspace, so a local clojurust checkout must be discoverable
+> (`CLJRS_WORKSPACE_ROOT`, or the checkout `cljrs` was built from). See
+> `notes/cljrs-dylib-pkgname-bug.md` for the `:rust/init` spelling used here.
 
 ## Usage
 
