@@ -1,1 +1,2 @@
-{:deps {tools.cli {:git/url "https://github.com/csm/tools.cli"}}}
+{:deps {tools.cli {:git/url "https://github.com/csm/tools.cli"}}
+ :paths ["src"]}
