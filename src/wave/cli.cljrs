@@ -1,0 +1,97 @@
+;; wave.cli — command-line parsing (a curl-flavoured subset) via tools.cli.
+;;
+;; parse-opts turns argv into an options map; ->cfg normalises that into the
+;; request config consumed by the version-specific clients.
+
+(ns wave.cli)
+
+(require '[clojure.tools.cli :refer [parse-opts]]
+         '[clojure.string    :as str]
+         '[wave.bytes        :as b])
+
+(def cli-options
+  [["-X" "--request METHOD"  "Specify request method to use"]
+   ["-H" "--header HEADER"   "Pass custom header(s) to server (repeatable)"
+    :multi true :default [] :update-fn conj]
+   ["-d" "--data DATA"       "HTTP POST data"]
+   ["-o" "--output FILE"     "Write to FILE instead of stdout"]
+   ["-O" "--remote-name"     "Write output to a file named as the remote file"]
+   ["-i" "--include"         "Include response headers in the output"]
+   ["-I" "--head"            "Show document info only (HEAD request)"]
+   ["-L" "--location"        "Follow redirects"]
+   [nil  "--max-redirs N"    "Maximum number of redirects allowed"
+    :default 50 :parse-fn parse-long]
+   ["-A" "--user-agent NAME" "Send User-Agent NAME to the server"]
+   ["-e" "--referer URL"     "Referer URL"]
+   ["-u" "--user USER:PASSWORD" "Server user and password for Basic auth"]
+   ["-k" "--insecure"        "Allow insecure TLS connections (skip verification)"]
+   ["-s" "--silent"          "Silent mode (suppress progress/error messages)"]
+   ["-v" "--verbose"         "Make the operation more talkative"]
+   [nil  "--connect-timeout SECONDS" "Maximum time allowed for connection"
+    :parse-fn parse-double]
+   [nil  "--http1.0"         "Use HTTP/1.0"                 :id :http10]
+   [nil  "--http1.1"         "Use HTTP/1.1 (default)"       :id :http11]
+   [nil  "--http2"           "Use HTTP/2"                   :id :http2]
+   [nil  "--http2-prior-knowledge" "Use HTTP/2 without an HTTP/1.1 Upgrade" :id :http2pk]
+   [nil  "--http3"           "Use HTTP/3"                   :id :http3]
+   [nil  "--url URL"         "URL to fetch (repeatable)"
+    :multi true :default [] :update-fn conj]
+   ["-h" "--help"            "Show this help text"]
+   ["-V" "--version"         "Show version number and quit"]])
+
+(defn parse
+  "Parse argv. Returns {:options :urls :errors :summary}."
+  [args]
+  (let [{:keys [options arguments errors summary]} (parse-opts args cli-options)]
+    {:options options
+     :urls    (vec (concat (:url options) arguments))
+     :errors  errors
+     :summary summary}))
+
+(defn- parse-header
+  "Split a -H \"Name: value\" string into [name value]."
+  [h]
+  (let [i (str/index-of h ":")]
+    (if (nil? i)
+      [(str/trim h) ""]
+      [(str/trim (subs h 0 i)) (str/triml (subs h (inc i)))])))
+
+(defn- select-version
+  [options]
+  (cond
+    (:http3 options)                          :http3
+    (or (:http2 options) (:http2pk options))  :http2
+    (:http10 options)                         :http10
+    :else                                     :http11))
+
+(defn- select-method
+  [options]
+  (cond
+    (:request options) (str/upper-case (:request options))
+    (:head options)    "HEAD"
+    (:data options)    "POST"
+    :else              "GET"))
+
+(defn ->cfg
+  "Build the per-URL request config from parsed options."
+  [options url]
+  {:url                    url
+   :method                 (select-method options)
+   :headers                (mapv parse-header (:header options))
+   :body                   (when (:data options) (b/str-> (:data options)))
+   :version                (select-version options)
+   :http2-prior-knowledge? (boolean (:http2pk options))
+   :head?                  (boolean (:head options))
+   :include?               (boolean (:include options))
+   :location?              (boolean (:location options))
+   :max-redirs             (or (:max-redirs options) 50)
+   :silent?                (boolean (:silent options))
+   :verbose?               (boolean (:verbose options))
+   :insecure?              (boolean (:insecure options))
+   :user                   (:user options)
+   :user-agent             (:user-agent options)
+   :referer                (:referer options)
+   :output                 (:output options)
+   :remote-name?           (boolean (:remote-name options))
+   :connect-timeout-ms     (when (:connect-timeout options)
+                             (long (* 1000 (:connect-timeout options))))})

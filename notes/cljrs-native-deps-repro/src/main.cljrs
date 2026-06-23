@@ -1,0 +1,8 @@
+(ns demo)
+
+;; cljrs.base64 is declared in cljrs.edn as a native (:rust/load :dylib)
+;; dependency. We expect `cljrs deps fetch` + this require to bring it in.
+(require '[cljrs.base64 :as base64])
+
+(defn -main [& _]
+  (println (base64/encode "user:pass")))   ; expect: dXNlcjpwYXNz

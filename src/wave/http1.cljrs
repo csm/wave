@@ -1,0 +1,148 @@
+;; wave.http1 — HTTP/1.0 and HTTP/1.1 client over the cljrs-net byte-stream layer.
+;;
+;; The request is written to the connection's :out channel; the whole response is
+;; drained from :in (we send `Connection: close`, so the server closes the stream
+;; at the end of the message and `drain-to` yields the complete byte sequence).
+;; That sidesteps keep-alive framing for this initial implementation — every
+;; request opens a fresh connection.  Content-Length and chunked transfer-encoding
+;; are both handled when decoding the body.
+
+(ns wave.http1)
+
+(require '[clojure.rust.net   :as net]
+         '[clojure.rust.error :as err]
+         '[clojure.core.async :refer [take! put!]]
+         '[clojure.string     :as str]
+         '[wave.bytes         :as b]
+         '[wave.url           :as url]
+         '[wave.http          :as http])
+
+;; ── Request encoding ──────────────────────────────────────────────────────────
+
+(defn build-request-bytes
+  [cfg u version-str]
+  (let [reg   (http/common-headers cfg)
+        hdrs0 (into [["Host" (:host-header u)]] reg)
+        hdrs  (http/assoc-default hdrs0 "Connection" "close")
+        head  (reduce (fn [acc [k v]] (str acc k ": " v "\r\n"))
+                      (str (:method cfg) " " (:path+query u) " " version-str "\r\n")
+                      hdrs)
+        head-bytes (b/str-> (str head "\r\n"))]
+    (if (:body cfg)
+      (b/concat-bytes [head-bytes (:body cfg)])
+      head-bytes)))
+
+;; ── Response decoding ─────────────────────────────────────────────────────────
+
+(defn- parse-status-line
+  [line]
+  (let [sp1     (str/index-of line " ")
+        version (if sp1 (subs line 0 sp1) "HTTP/1.1")
+        rest    (if sp1 (subs line (inc sp1)) line)
+        sp2     (str/index-of rest " ")
+        code    (if sp2 (subs rest 0 sp2) rest)
+        reason  (if sp2 (str/trim (subs rest (inc sp2))) "")]
+    [version (or (parse-long (str/trim code)) 0) reason]))
+
+(defn- parse-headers
+  [lines]
+  (reduce (fn [acc line]
+            (let [i (str/index-of line ":")]
+              (if (or (str/blank? line) (nil? i))
+                acc
+                (conj acc [(str/trim (subs line 0 i))
+                           (str/trim (subs line (inc i)))]))))
+          []
+          lines))
+
+(defn- hex-digit
+  [c]
+  (cond
+    (and (>= c 48) (<= c 57))  (- c 48)
+    (and (>= c 97) (<= c 102)) (+ 10 (- c 97))
+    (and (>= c 65) (<= c 70))  (+ 10 (- c 65))
+    :else                      nil))
+
+(defn- parse-hex-bytes
+  "Parse a hexadecimal chunk size from byte-array body over [start end), stopping
+  at a chunk-extension ';' or whitespace. Returns the size or nil."
+  [body start end]
+  (loop [i start acc 0 any false]
+    (if (>= i end)
+      (if any acc nil)
+      (let [c (b/ba-get body i)]
+        (if (or (= c 59) (= c 32) (= c 9) (= c 13))
+          (if any acc nil)
+          (let [d (hex-digit c)]
+            (if (nil? d)
+              (if any acc nil)
+              (recur (inc i) (+ (* acc 16) d) true))))))))
+
+(defn- dechunk
+  "Decode an HTTP/1.1 chunked-transfer body into the raw payload bytes."
+  [body]
+  (let [n (alength body)]
+    (loop [pos 0 acc []]
+      (let [crlf (b/index-of-seq body [13 10] pos)]
+        (if (< crlf 0)
+          (b/concat-bytes acc)
+          (let [size       (parse-hex-bytes body pos crlf)
+                data-start (+ crlf 2)]
+            (if (or (nil? size) (<= size 0))
+              (b/concat-bytes acc)
+              (let [data-end (min (+ data-start size) n)]
+                (recur (+ data-end 2)
+                       (conj acc (b/slice body data-start data-end)))))))))))
+
+(defn parse-response
+  [raw head?]
+  (let [sep        (b/index-of-seq raw [13 10 13 10] 0)
+        header-end (if (>= sep 0) sep (alength raw))
+        header-str (b/->str (b/slice raw 0 header-end))
+        body-start (if (>= sep 0) (+ sep 4) (alength raw))
+        body-raw   (b/slice raw body-start (alength raw))
+        lines      (str/split-lines header-str)
+        [version status reason] (parse-status-line (or (first lines) ""))
+        headers    (parse-headers (rest lines))
+        te         (http/header-value headers "Transfer-Encoding")
+        chunked?   (and te (str/includes? (str/lower-case te) "chunked"))
+        body       (cond
+                     head?    (byte-array 0)
+                     chunked? (dechunk body-raw)
+                     :else    body-raw)]
+    {:version version
+     :status  status
+     :reason  reason
+     :headers headers
+     :body    body}))
+
+;; ── Request driver ────────────────────────────────────────────────────────────
+
+(defn ^:async request
+  "Perform an HTTP/1.x request described by cfg. Returns a response map
+  {:version :status :reason :headers :body} or {:error msg}."
+  [cfg]
+  (let [u           (url/parse (:url cfg))
+        version-str (if (= (:version cfg) :http10) "HTTP/1.0" "HTTP/1.1")
+        tls?        (url/tls? u)
+        base        {:host (:host u) :port (:port u)}
+        opts        (if tls?
+                      (assoc base
+                             :transport :tls
+                             :alpn ["http/1.1"]
+                             :insecure-skip-verify (boolean (:insecure? cfg)))
+                      base)
+        opts        (if (:connect-timeout-ms cfg)
+                      (assoc opts :connect-timeout-ms (:connect-timeout-ms cfg))
+                      opts)
+        conn        (await (take! (net/connect opts)))]
+    (if (err/error? conn)
+      {:error (str "could not connect to " (:host u) ":" (:port u) " — "
+                   (http/error-message conn))}
+      (let [req (build-request-bytes cfg u version-str)]
+        (await (put! (:out conn) req))
+        (let [{:keys [values error]} (await (net/drain-to (:in conn)))]
+          (net/close conn)
+          (if (and (empty? values) error)
+            {:error (str "read failed: " error)}
+            (parse-response (b/concat-bytes values) (:head? cfg))))))))

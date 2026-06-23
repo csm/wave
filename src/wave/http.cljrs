@@ -1,0 +1,87 @@
+;; wave.http — shared HTTP helpers across the version-specific clients.
+;;
+;; Header lists are kept as ordered vectors of [name value] string pairs so the
+;; request order is preserved (HTTP/1.x) and pseudo-headers can be prepended for
+;; HTTP/2 and HTTP/3.  Lookups are case-insensitive per RFC 7230.
+
+(ns wave.http)
+
+(require '[clojure.string :as str]
+         '[cljrs.base64   :as base64])
+
+(def version-name "wave/0.1.0")
+
+;; ── Header utilities ──────────────────────────────────────────────────────────
+
+(defn lc [s] (str/lower-case s))
+
+(defn header-value
+  "Case-insensitive lookup of the first matching header value, or nil."
+  [headers name]
+  (let [want (lc name)]
+    (loop [hs (seq headers)]
+      (when hs
+        (let [[k v] (first hs)]
+          (if (= (lc k) want) v (recur (next hs))))))))
+
+(defn has-header?
+  [headers name]
+  (some? (header-value headers name)))
+
+(defn assoc-default
+  "Append [name value] to headers only if name is not already present."
+  [headers name value]
+  (if (has-header? headers name)
+    headers
+    (conj (vec headers) [name value])))
+
+;; ── Request header assembly ───────────────────────────────────────────────────
+
+(defn common-headers
+  "Assemble the regular (non-pseudo) request headers from cfg.  User -H headers
+  come first and win; well-known defaults are filled in only when absent.
+
+  Does NOT include Host / :authority — that is transport-specific and added by
+  each version client."
+  [cfg]
+  (let [user-hdrs (vec (:headers cfg))
+        body      (:body cfg)
+        with-ua   (assoc-default user-hdrs "User-Agent"
+                                 (or (:user-agent cfg) version-name))
+        with-acc  (assoc-default with-ua "Accept" "*/*")
+        with-ref  (if (:referer cfg)
+                    (assoc-default with-acc "Referer" (:referer cfg))
+                    with-acc)
+        with-auth (if (:user cfg)
+                    (assoc-default with-ref "Authorization"
+                                   (str "Basic " (base64/encode (:user cfg))))
+                    with-ref)
+        with-ct   (if (and body (not (has-header? with-auth "Content-Type")))
+                    (conj with-auth ["Content-Type" "application/x-www-form-urlencoded"])
+                    with-auth)
+        with-len  (if (and body (not (has-header? with-ct "Content-Length")))
+                    (conj with-ct ["Content-Length" (str (alength body))])
+                    with-ct)]
+    with-len))
+
+;; ── Response presentation ─────────────────────────────────────────────────────
+
+(defn status-line
+  "Reconstruct a printable status line for a response map."
+  [resp]
+  (str (:version resp) " " (:status resp)
+       (when (:reason resp) (str " " (:reason resp)))))
+
+(defn header-block
+  "Render a response's headers as CRLF-terminated lines."
+  [resp]
+  (reduce (fn [acc [k v]] (str acc k ": " v "\r\n")) "" (:headers resp)))
+
+(defn redirect?
+  [status]
+  (contains? #{301 302 303 307 308} status))
+
+(defn error-message
+  "Concise message for an in-band error value (or a fallback string)."
+  [e]
+  (or (ex-message e) (str e)))

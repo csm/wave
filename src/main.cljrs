@@ -1,3 +1,158 @@
+;; wave — a URL-fetching CLI in the spirit of curl/wget.
+;;
+;; Fully asynchronous: -main is ^:async and every request runs over cljrs-net's
+;; channel-based transports.  Speaks HTTP/1.0, HTTP/1.1, HTTP/2 and HTTP/3,
+;; selected with curl-style flags (--http1.0 / --http1.1 / --http2 / --http3).
+
 (ns wave)
 
-(defn ^:async -main [& args])
+(require '[clojure.string     :as str]
+         '[clojure.core.async :refer [take!]]
+         '[clojure.rust.io.async :as io]
+         '[wave.cli           :as cli]
+         '[wave.url           :as url]
+         '[wave.http          :as http]
+         '[wave.http1         :as http1]
+         '[wave.http2         :as http2]
+         '[wave.http3         :as http3]
+         '[wave.bytes         :as b])
+
+;; ── Version dispatch ──────────────────────────────────────────────────────────
+
+(defn- ^:async do-request
+  [cfg]
+  (let [v (:version cfg)]
+    (cond
+      (= v :http3)  (await (http3/request cfg))
+      (= v :http2)  (await (http2/request cfg))
+      (= v :http10) (await (http1/request cfg))
+      :else         (await (http1/request cfg)))))
+
+;; ── Redirect handling ─────────────────────────────────────────────────────────
+
+(defn- resolve-redirect
+  [base-url loc]
+  (cond
+    (str/includes? loc "://")
+    loc
+
+    (str/starts-with? loc "/")
+    (let [u (url/parse base-url)]
+      (str (:scheme u) "://" (:host-header u) loc))
+
+    :else
+    (let [u   (url/parse base-url)
+          p   (:path u)
+          i   (str/last-index-of p "/")
+          dir (if i (subs p 0 (inc i)) "/")]
+      (str (:scheme u) "://" (:host-header u) dir loc))))
+
+(defn- ^:async fetch-following
+  "Issue the request, following redirects when -L is set."
+  [cfg]
+  (loop [cfg cfg n 0]
+    (let [resp (await (do-request cfg))
+          loc  (when-not (:error resp)
+                 (http/header-value (:headers resp) "Location"))]
+      (if (and (:location? cfg)
+               (not (:error resp))
+               (http/redirect? (:status resp))
+               loc
+               (< n (:max-redirs cfg)))
+        (let [next-url    (resolve-redirect (:url cfg) loc)
+              to-get?     (and (not= (:method cfg) "HEAD")
+                               (contains? #{301 302 303} (:status resp)))
+              next-method (if to-get? "GET" (:method cfg))
+              next-cfg    (assoc cfg
+                                 :url    next-url
+                                 :method next-method
+                                 :body   (if to-get? nil (:body cfg)))]
+          (when (:verbose? cfg)
+            (println (str "* Following redirect to " next-url)))
+          (recur next-cfg (inc n)))
+        resp))))
+
+;; ── Output ────────────────────────────────────────────────────────────────────
+
+(defn- remote-filename
+  [raw]
+  (let [u    (url/parse raw)
+        p    (:path u)
+        i    (str/last-index-of p "/")
+        name (if i (subs p (inc i)) p)]
+    (if (str/blank? name) "index.html" name)))
+
+(defn- ^:async emit
+  [cfg resp]
+  (when (:verbose? cfg)
+    (println (str "< " (http/status-line resp)))
+    (doseq [[k v] (:headers resp)] (println (str "< " k ": " v)))
+    (println "<"))
+  (let [header-str (str (http/status-line resp) "\r\n"
+                        (http/header-block resp) "\r\n")]
+    (if (:head? cfg)
+      (print header-str)
+      (let [fname (cond
+                    (:output cfg)       (:output cfg)
+                    (:remote-name? cfg) (remote-filename (:url cfg))
+                    :else               nil)]
+        (when (:include? cfg) (print header-str))
+        (if fname
+          (do (await (take! (io/spit fname (:body resp))))
+              (when-not (:silent? cfg)
+                (println (str "* Wrote " (alength (:body resp)) " bytes to " fname))))
+          (print (b/->str (:body resp)))))))
+  (flush))
+
+;; ── Usage ─────────────────────────────────────────────────────────────────────
+
+(defn- usage
+  [summary]
+  (str "wave — a URL-fetching CLI (HTTP/1.0, 1.1, 2 and 3)\n\n"
+       "Usage: wave [options] <url> [url...]\n\n"
+       "Options:\n" summary "\n\n"
+       "Examples:\n"
+       "  wave https://example.com/\n"
+       "  wave -I https://example.com/\n"
+       "  wave --http2 -H 'Accept: application/json' https://example.com/\n"
+       "  wave --http3 https://cloudflare-quic.com/\n"
+       "  wave -X POST -d 'a=1&b=2' http://httpbin.org/post\n"))
+
+;; ── Entry point ───────────────────────────────────────────────────────────────
+
+;; NOTE: -main itself is synchronous and simply forwards to the ^:async driver,
+;; returning its future for the runtime to await.  A variadic ^:async -main does
+;; not receive its arguments correctly in the current cljrs runtime, whereas a
+;; synchronous variadic -main does — so we keep arg handling on the sync side.
+(defn- ^:async run-cli
+  [args]
+  (let [{:keys [options urls errors summary]} (cli/parse args)]
+    (cond
+      (:help options)
+      (println (usage summary))
+
+      (:version options)
+      (println http/version-name)
+
+      (seq errors)
+      (do
+        (doseq [e errors] (println e))
+        (println "Try 'wave --help' for usage."))
+
+      (empty? urls)
+      (println "wave: no URL specified. Try 'wave --help' for usage.")
+
+      :else
+      (loop [us (seq urls)]
+        (when us
+          (let [cfg  (cli/->cfg options (first us))
+                resp (await (fetch-following cfg))]
+            (if (:error resp)
+              (when-not (:silent? cfg)
+                (println (str "wave: " (:error resp))))
+              (await (emit cfg resp))))
+          (recur (next us)))))))
+
+(defn -main
+  [& args]
+  (run-cli (vec args)))
