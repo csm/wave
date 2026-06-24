@@ -120,12 +120,8 @@
 
 ;; ── Entry point ───────────────────────────────────────────────────────────────
 
-;; NOTE: -main itself is synchronous and simply forwards to the ^:async driver,
-;; returning its future for the runtime to await.  A variadic ^:async -main does
-;; not receive its arguments correctly in the current cljrs runtime, whereas a
-;; synchronous variadic -main does — so we keep arg handling on the sync side.
-(defn- ^:async run-cli
-  [args]
+(defn ^:async -main
+  [& args]
   (let [{:keys [options urls errors summary]} (cli/parse args)]
     (cond
       (:help options)
@@ -152,7 +148,3 @@
                 (println (str "wave: " (:error resp))))
               (await (emit cfg resp))))
           (recur (next us)))))))
-
-(defn -main
-  [& args]
-  (run-cli (vec args)))

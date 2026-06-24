@@ -1,5 +1,11 @@
 # Repro: native dep declared in `cljrs.edn` is not loadable by `require`
 
+> **Update:** the "Could not find namespace" failure this repro was written for
+> is **fixed** as of clojurust `8cd7b29`. With the fix, `require` now reaches the
+> native-dep dylib builder; this same repro (underscored `:rust/init`) now fails
+> one step later with a cargo package-name error — see
+> [`../cljrs-dylib-pkgname-bug.md`](../cljrs-dylib-pkgname-bug.md).
+
 Minimal, self-contained reproduction for
 [`../cljrs-native-deps-issue.md`](../cljrs-native-deps-issue.md).
 

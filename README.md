@@ -20,17 +20,25 @@ native QUIC/HTTP-3 client.
 
 ## Building / running
 
-`wave` depends on a cljrs build with the default `net`, `async` and `charset`
-features and the `cljrs.base64` library (used for HTTP Basic auth), plus the
-`clojure.tools.cli` git dependency declared in `cljrs.edn`.
+`wave` depends on a cljrs build with the default `net`, `async`, `charset` and
+`base64` features (used for HTTP Basic auth). The one declared dependency is the
+`clojure.tools.cli` git dep in `cljrs.edn`, fetched with `cljrs deps fetch`:
 
 ```sh
-# Fetch the git dependency (tools.cli) into ~/.cljrs/cache
+# Fetch declared git dependencies into ~/.cljrs/cache
 cljrs deps fetch
 
 # Run
 cljrs run src/main.cljrs -- https://example.com/
 ```
+
+### Smoke test
+
+`.github/workflows/cli-smoke.yml` is a `workflow_dispatch` job that installs the
+released `cljrs` from crates.io and drives the CLI against a target (default
+`https://www.google.com/`) over HTTP/1.1, HTTP/2 and HTTP/3, asserting each
+protocol negotiates and parses a response. Run it from the Actions tab; the
+target is an optional input.
 
 ## Usage
 
@@ -101,5 +109,3 @@ which `main` renders.
 - No transparent decompression (`--compressed` is not yet implemented).
 - Binary bodies printed to stdout are decoded as UTF-8; use `-o` to save bytes
   verbatim.
-- `-main` is a thin synchronous wrapper over an `^:async` driver (the current
-  cljrs runtime does not pass arguments to a variadic `^:async -main`).

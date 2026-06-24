@@ -1,5 +1,17 @@
 # Native-code dependencies declared in `cljrs.edn` cannot be loaded by `require`
 
+> **Resolved** in clojurust `8cd7b29`: `apply_deps_config` now materializes each
+> git dep's worktree and adds its `:paths` to the source path
+> (`add_dep_source_paths`), and the unversioned `require` loader (`do_load`) now
+> consults the `:rust/load :dylib` native-dependency loader. Verified: a plain
+> `(require '[clojure.tools.cli …])` resolves with no `--src-path`, and a
+> `:rust/load :dylib` dep is built and loaded on `require`.
+>
+> A follow-up bug remains in the dylib wrapper build for crates whose package
+> name contains a hyphen — see
+> [`cljrs-dylib-pkgname-bug.md`](./cljrs-dylib-pkgname-bug.md). The original
+> analysis below is kept for history.
+
 ## Summary
 
 A dependency that ships **native Rust code** (a crate exposing a `cljrs_init`
