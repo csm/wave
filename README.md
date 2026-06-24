@@ -20,13 +20,9 @@ native QUIC/HTTP-3 client.
 
 ## Building / running
 
-`wave` depends on a cljrs build with the default `net`, `async` and `charset`
-features. Two dependencies are declared in `cljrs.edn` and brought in by
-`cljrs deps fetch`:
-
-- `clojure.tools.cli` — argument parsing (pure-Clojure git dep).
-- `cljrs.base64` — HTTP Basic-auth encoding (native `:rust/load :dylib` dep;
-  built into a wrapper cdylib and loaded on first use).
+`wave` depends on a cljrs build with the default `net`, `async`, `charset` and
+`base64` features (used for HTTP Basic auth). The one declared dependency is the
+`clojure.tools.cli` git dep in `cljrs.edn`, fetched with `cljrs deps fetch`:
 
 ```sh
 # Fetch declared git dependencies into ~/.cljrs/cache
@@ -35,11 +31,6 @@ cljrs deps fetch
 # Run
 cljrs run src/main.cljrs -- https://example.com/
 ```
-
-> Loading the native `cljrs.base64` dep builds a wrapper crate against the
-> clojurust workspace, so a local clojurust checkout must be discoverable
-> (`CLJRS_WORKSPACE_ROOT`, or the checkout `cljrs` was built from). See
-> `notes/cljrs-dylib-pkgname-bug.md` for the `:rust/init` spelling used here.
 
 ## Usage
 
@@ -110,5 +101,3 @@ which `main` renders.
 - No transparent decompression (`--compressed` is not yet implemented).
 - Binary bodies printed to stdout are decoded as UTF-8; use `-o` to save bytes
   verbatim.
-- `-main` is a thin synchronous wrapper over an `^:async` driver (the current
-  cljrs runtime does not pass arguments to a variadic `^:async -main`).
