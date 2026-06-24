@@ -37,15 +37,18 @@ jobs:
 
       - name: Install cljrs ${{ env.CLJRS_VERSION }} from crates.io
         if: steps.cache-cljrs.outputs.cache-hit != 'true'
-        run: cargo install cljrs --version "${CLJRS_VERSION}" --locked
+        run: cargo install cljrs --version "${CLJRS_VERSION}" --locke
 
       - name: Versions
         run: |
           cljrs --version || true
-          cljrs run src/main.cljrs -- --version
 
       - name: Fetch declared deps (tools.cli)
         run: cljrs deps fetch
+
+      - name: Version
+        run: |
+          cljrs run src/main.cljrs -- --version
 
       - name: HTTP/1.1
         run: |
