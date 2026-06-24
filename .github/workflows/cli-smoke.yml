@@ -37,7 +37,7 @@ jobs:
 
       - name: Install cljrs ${{ env.CLJRS_VERSION }} from crates.io
         if: steps.cache-cljrs.outputs.cache-hit != 'true'
-        run: cargo install cljrs --version "${CLJRS_VERSION}" --locke
+        run: cargo install cljrs --version "${CLJRS_VERSION}" --locked
 
       - name: Versions
         run: |
