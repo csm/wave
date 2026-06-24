@@ -1,0 +1,93 @@
+name: CLI smoke (HTTP 1.1 / 2 / 3)
+
+# Manually-triggered smoke test: build the released cljrs from crates.io, then
+# drive the wave CLI against a public target over HTTP/1.1, HTTP/2 and HTTP/3.
+# Each step asserts that wave negotiated that exact protocol and parsed a
+# response (any status line of the matching version).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "URL to fetch (must support HTTP/1.1, /2 and /3)"
+        required: false
+        default: "https://www.google.com/"
+
+env:
+  CLJRS_VERSION: "0.1.176"
+  RUST_LOG: "off"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cljrs binary
+        id: cache-cljrs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cljrs
+          key: cljrs-bin-${{ runner.os }}-${{ env.CLJRS_VERSION }}
+
+      - name: Install cljrs ${{ env.CLJRS_VERSION }} from crates.io
+        if: steps.cache-cljrs.outputs.cache-hit != 'true'
+        run: cargo install cljrs --version "${CLJRS_VERSION}" --locked
+
+      - name: Versions
+        run: |
+          cljrs --version || true
+          cljrs run src/main.cljrs -- --version
+
+      - name: Fetch declared deps (tools.cli)
+        run: cljrs deps fetch
+
+      - name: HTTP/1.1
+        run: |
+          set -uo pipefail
+          echo "GET $TARGET over HTTP/1.1"
+          timeout 90 cljrs run src/main.cljrs -- --http1.1 --connect-timeout 20 -i "$TARGET" \
+            > out.txt 2> err.txt || true
+          sed -n '1,12p' out.txt
+          if grep -qE '^HTTP/1\.1 [0-9]{3}' out.txt; then
+            echo "::notice::HTTP/1.1 OK — $(head -1 out.txt)"
+          else
+            echo "::error::HTTP/1.1 produced no matching status line"
+            echo "----- stderr -----"; tail -n 30 err.txt
+            exit 1
+          fi
+
+      - name: HTTP/2
+        run: |
+          set -uo pipefail
+          echo "GET $TARGET over HTTP/2"
+          timeout 90 cljrs run src/main.cljrs -- --http2 --connect-timeout 20 -i "$TARGET" \
+            > out.txt 2> err.txt || true
+          sed -n '1,12p' out.txt
+          if grep -qE '^HTTP/2 [0-9]{3}' out.txt; then
+            echo "::notice::HTTP/2 OK — $(head -1 out.txt)"
+          else
+            echo "::error::HTTP/2 produced no matching status line"
+            echo "----- stderr -----"; tail -n 30 err.txt
+            exit 1
+          fi
+
+      - name: HTTP/3
+        run: |
+          set -uo pipefail
+          echo "GET $TARGET over HTTP/3"
+          timeout 90 cljrs run src/main.cljrs -- --http3 --connect-timeout 20 -i "$TARGET" \
+            > out.txt 2> err.txt || true
+          sed -n '1,12p' out.txt
+          if grep -qE '^HTTP/3 [0-9]{3}' out.txt; then
+            echo "::notice::HTTP/3 OK — $(head -1 out.txt)"
+          else
+            echo "::error::HTTP/3 produced no matching status line"
+            echo "----- stderr -----"; tail -n 30 err.txt
+            exit 1
+          fi

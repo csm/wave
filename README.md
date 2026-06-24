@@ -32,6 +32,14 @@ cljrs deps fetch
 cljrs run src/main.cljrs -- https://example.com/
 ```
 
+### Smoke test
+
+`.github/workflows/cli-smoke.yml` is a `workflow_dispatch` job that installs the
+released `cljrs` from crates.io and drives the CLI against a target (default
+`https://www.google.com/`) over HTTP/1.1, HTTP/2 and HTTP/3, asserting each
+protocol negotiates and parses a response. Run it from the Actions tab; the
+target is an optional input.
+
 ## Usage
 
 ```
