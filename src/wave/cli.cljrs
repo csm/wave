@@ -32,7 +32,6 @@
    [nil  "--http1.0"         "Use HTTP/1.0"                 :id :http10]
    [nil  "--http1.1"         "Use HTTP/1.1 (default)"       :id :http11]
    [nil  "--http2"           "Use HTTP/2"                   :id :http2]
-   [nil  "--http2-prior-knowledge" "Use HTTP/2 without an HTTP/1.1 Upgrade" :id :http2pk]
    [nil  "--http3"           "Use HTTP/3"                   :id :http3]
    [nil  "--url URL"         "URL to fetch (repeatable)"
     :multi true :default [] :update-fn conj]
@@ -59,10 +58,10 @@
 (defn- select-version
   [options]
   (cond
-    (:http3 options)                          :http3
-    (or (:http2 options) (:http2pk options))  :http2
-    (:http10 options)                         :http10
-    :else                                     :http11))
+    (:http3 options)  :http3
+    (:http2 options)  :http2
+    (:http10 options) :http10
+    :else             :http11))
 
 (defn- select-method
   [options]
@@ -80,7 +79,6 @@
    :headers                (mapv parse-header (:header options))
    :body                   (when (:data options) (b/str-> (:data options)))
    :version                (select-version options)
-   :http2-prior-knowledge? (boolean (:http2pk options))
    :head?                  (boolean (:head options))
    :include?               (boolean (:include options))
    :location?              (boolean (:location options))
