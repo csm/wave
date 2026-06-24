@@ -15,7 +15,7 @@ native QUIC/HTTP-3 client.
 |---|---|---|
 | HTTP/1.0 | TCP / TLS | `Connection: close`, one request per connection |
 | HTTP/1.1 | TCP / TLS | Content-Length and chunked transfer decoding |
-| HTTP/2   | TLS (`h2`) / cleartext (prior knowledge) | own framing + HPACK (static table + Huffman) |
+| HTTP/2   | TLS (`h2`) | via `clojure.rust.net.http2` |
 | HTTP/3   | QUIC | via `clojure.rust.net.h3` |
 
 ## Building / running
@@ -66,7 +66,6 @@ wave [options] <url> [url...]
 | `--connect-timeout SECONDS` | Connection timeout |
 | `--http1.0` / `--http1.1` | Force HTTP/1.0 / 1.1 (default 1.1) |
 | `--http2` | Use HTTP/2 |
-| `--http2-prior-knowledge` | HTTP/2 over cleartext without upgrade |
 | `--http3` | Use HTTP/3 |
 | `-h, --help` / `-V, --version` | Help / version |
 
@@ -92,8 +91,7 @@ Source lives under `src/`, one namespace per file:
 | `wave.url` | URL parsing |
 | `wave.http` | Shared header helpers, Basic-auth base64, defaults |
 | `wave.http1` | HTTP/1.0 + 1.1 client |
-| `wave.http2` | HTTP/2 framing client |
-| `wave.hpack` | HPACK encode/decode (incl. Huffman) for HTTP/2 |
+| `wave.http2` | HTTP/2 client (wraps `clojure.rust.net.http2`) |
 | `wave.http3` | HTTP/3 client (wraps `clojure.rust.net.h3`) |
 | `wave.bytes` | Byte-array utilities over the async byte streams |
 
@@ -104,8 +102,8 @@ which `main` renders.
 ### Notes & limitations
 
 - One request per connection (no keep-alive pooling yet).
-- HTTP/2's HPACK encoder emits literal, non-Huffman fields (always valid); the
-  decoder handles the full static/dynamic table and Huffman strings.
+- HTTP/2 and HTTP/3 use cljrs-net's native clients (TLS-only); there is no
+  cleartext h2c prior-knowledge mode.
 - No transparent decompression (`--compressed` is not yet implemented).
 - Binary bodies printed to stdout are decoded as UTF-8; use `-o` to save bytes
   verbatim.
