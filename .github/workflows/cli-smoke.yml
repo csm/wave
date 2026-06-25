@@ -48,7 +48,7 @@ jobs:
 
       - name: Version
         run: |
-          cljrs run src/main.cljrs -- --version
+          cljrs run src/wave.cljrs -- --version
 
       - name: AOT compile
         continue-on-error: true
@@ -59,7 +59,7 @@ jobs:
         run: |
           set -uo pipefail
           echo "GET $TARGET over HTTP/1.1"
-          timeout 90 cljrs run src/main.cljrs -- --http1.1 --connect-timeout 20 -i "$TARGET" \
+          timeout 90 cljrs run src/wave.cljrs -- --http1.1 --connect-timeout 20 -i "$TARGET" \
             > out.txt 2> err.txt || true
           sed -n '1,12p' out.txt
           if grep -qE '^HTTP/1\.1 [0-9]{3}' out.txt; then
@@ -75,7 +75,7 @@ jobs:
         run: |
           set -uo pipefail
           echo "GET $TARGET over HTTP/2"
-          timeout 90 cljrs run src/main.cljrs -- --http2 --connect-timeout 20 -i "$TARGET" \
+          timeout 90 cljrs run src/wave.cljrs -- --http2 --connect-timeout 20 -i "$TARGET" \
             > out.txt 2> err.txt || true
           sed -n '1,12p' out.txt
           if grep -qE '^HTTP/2 [0-9]{3}' out.txt; then
@@ -91,7 +91,7 @@ jobs:
         run: |
           set -uo pipefail
           echo "GET $TARGET over HTTP/3"
-          timeout 90 cljrs run src/main.cljrs -- --http3 --connect-timeout 20 -i "$TARGET" \
+          timeout 90 cljrs run src/wave.cljrs -- --http3 --connect-timeout 20 -i "$TARGET" \
             > out.txt 2> err.txt || true
           sed -n '1,12p' out.txt
           if grep -qE '^HTTP/3 [0-9]{3}' out.txt; then
