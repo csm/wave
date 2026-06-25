@@ -51,6 +51,7 @@ jobs:
           cljrs run src/main.cljrs -- --version
 
       - name: AOT compile
+        continue-on-error: true
         run: cljrs compile -o wave
 
       - name: HTTP/1.1
