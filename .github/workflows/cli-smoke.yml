@@ -14,7 +14,7 @@ on:
         default: "https://www.google.com/"
 
 env:
-  CLJRS_VERSION: "0.1.177"
+  CLJRS_VERSION: "0.1.180"
   RUST_LOG: "off"
 
 jobs:
@@ -49,6 +49,9 @@ jobs:
       - name: Version
         run: |
           cljrs run src/main.cljrs -- --version
+
+      - name: AOT compile
+        run: cljrs compile -o wave
 
       - name: HTTP/1.1
         continue-on-error: true
@@ -97,3 +100,52 @@ jobs:
             echo "----- stderr -----"; tail -n 30 err.txt
             exit 1
           fi
+
+      - name: AOT HTTP/1.1
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "GET $TARGET over HTTP/1.1"
+          timeout 90 ./wave --http1.1 --connect-timeout 20 -i "$TARGET" \
+            > out.txt 2> err.txt || true
+          sed -n '1,12p' out.txt
+          if grep -qE '^HTTP/1\.1 [0-9]{3}' out.txt; then
+            echo "::notice::HTTP/1.1 OK — $(head -1 out.txt)"
+          else
+            echo "::error::HTTP/1.1 produced no matching status line"
+            echo "----- stderr -----"; tail -n 30 err.txt
+            exit 1
+          fi
+
+      - name: AOT HTTP/2
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "GET $TARGET over HTTP/2"
+          timeout 90 ./wave --http2 --connect-timeout 20 -i "$TARGET" \
+            > out.txt 2> err.txt || true
+          sed -n '1,12p' out.txt
+          if grep -qE '^HTTP/2 [0-9]{3}' out.txt; then
+            echo "::notice::HTTP/2 OK — $(head -1 out.txt)"
+          else
+            echo "::error::HTTP/2 produced no matching status line"
+            echo "----- stderr -----"; tail -n 30 err.txt
+            exit 1
+          fi
+
+      - name: AOT HTTP/3
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "GET $TARGET over HTTP/3"
+          timeout 90 ./wave --http3 --connect-timeout 20 -i "$TARGET" \
+            > out.txt 2> err.txt || true
+          sed -n '1,12p' out.txt
+          if grep -qE '^HTTP/3 [0-9]{3}' out.txt; then
+            echo "::notice::HTTP/3 OK — $(head -1 out.txt)"
+          else
+            echo "::error::HTTP/3 produced no matching status line"
+            echo "----- stderr -----"; tail -n 30 err.txt
+            exit 1
+          fi
+
