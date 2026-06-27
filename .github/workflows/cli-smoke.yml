@@ -14,7 +14,7 @@ on:
         default: "https://www.google.com/"
 
 env:
-  CLJRS_VERSION: "0.1.186"
+  CLJRS_VERSION: "0.1.188"
   RUST_LOG: "off"
 
 jobs:
